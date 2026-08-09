@@ -1,0 +1,2 @@
+[console_scripts]
+health-service = health_service.main:run
