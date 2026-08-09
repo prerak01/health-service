@@ -1,4 +1,16 @@
+Metadata-Version: 2.4
+Name: health-service
+Version: 0.1.0
+Summary: A minimal FastAPI health service.
+Requires-Python: ==3.13.*
+Description-Content-Type: text/markdown
+Requires-Dist: fastapi<1.0,>=0.115
+Requires-Dist: uvicorn<1.0,>=0.30
+
 # Health Service
+
+A minimal FastAPI service that reports process health and whether it was started
+as a test run.
 
 ## Prerequisite
 
