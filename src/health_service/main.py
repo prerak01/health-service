@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
@@ -20,6 +21,7 @@ from health_service.database import (
     is_database_ready,
     list_endpoints as fetch_endpoints,
 )
+from health_service.scheduler import HealthCheckScheduler
 
 
 class EndpointCreateRequest(BaseModel):
@@ -37,7 +39,7 @@ class EndpointResponse(BaseModel):
     url: str
     check_interval_seconds: int
     expected_status_code: int
-    current_state: Literal["pending"]
+    current_state: Literal["pending", "healthy", "unhealthy"]
     last_checked_at: datetime | None
     next_check_at: datetime | None
     created_at: datetime
@@ -50,9 +52,21 @@ def _database_unavailable() -> HTTPException:
     )
 
 
-def create_app(*, test_run: bool = False) -> FastAPI:
+def create_app(*, test_run: bool = False, enable_scheduler: bool = True) -> FastAPI:
     """Create the application with its process-level configuration."""
-    app = FastAPI(title="Health Service")
+    scheduler = HealthCheckScheduler() if enable_scheduler else None
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        if scheduler is not None:
+            scheduler.start()
+        try:
+            yield
+        finally:
+            if scheduler is not None:
+                scheduler.stop()
+
+    app = FastAPI(title="Health Service", lifespan=lifespan)
 
     @app.get("/health")
     def health() -> dict[str, str | bool]:

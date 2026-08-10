@@ -76,9 +76,10 @@ database is connected and `503` when it is unavailable.
 
 ## Endpoint API
 
-The service creates its `endpoints` table automatically when an endpoint API is
-first used. Endpoint registration stores configuration only; checks and
-scheduling are not yet part of the service.
+The service creates its endpoint and health-check result tables automatically.
+After startup, a scheduler scans for due endpoints every five seconds. Each
+endpoint check runs in a worker pool capped at 50 concurrent checks and has a
+two-second request timeout.
 
 ### Register an endpoint
 
@@ -103,6 +104,14 @@ are service-managed; a new endpoint starts in `pending` state.
   "created_at": "2026-08-10T12:00:00Z"
 }
 ```
+
+Once a check completes, its result is stored in `health_check_results`. An
+endpoint is `healthy` only when the returned HTTP status exactly matches its
+configured `expected_status_code`; timeouts, request failures, and mismatched
+statuses set it to `unhealthy`. The endpoint's `last_checked_at` and
+`next_check_at` fields are updated with the result. The scheduler currently
+uses an in-memory ongoing-check set and is intended to run as one service
+process. 
 
 ### List endpoints
 

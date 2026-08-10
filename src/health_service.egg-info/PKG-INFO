@@ -84,6 +84,62 @@ The service listens on `http://127.0.0.1:8000`. `GET /health` returns:
 `GET /ready` verifies that PostgreSQL is reachable. It returns `200` when the
 database is connected and `503` when it is unavailable.
 
+## Endpoint API
+
+The service creates its endpoint and health-check result tables automatically.
+After startup, a scheduler scans for due endpoints every five seconds. Each
+endpoint check runs in a worker pool capped at 50 concurrent checks and has a
+two-second request timeout.
+
+### Register an endpoint
+
+```bash
+curl --request POST http://127.0.0.1:8000/endpoints \
+  --header 'content-type: application/json' \
+  --data '{"url":"https://example.com/health","check_interval_seconds":30,"expected_status_code":200}'
+```
+
+It returns `201 Created` and the persisted endpoint. `id` and lifecycle fields
+are service-managed; a new endpoint starts in `pending` state.
+
+```json
+{
+  "id": "e18e671d-8f3e-4d2c-b3d8-6d540f8e52e8",
+  "url": "https://example.com/health",
+  "check_interval_seconds": 30,
+  "expected_status_code": 200,
+  "current_state": "pending",
+  "last_checked_at": null,
+  "next_check_at": null,
+  "created_at": "2026-08-10T12:00:00Z"
+}
+```
+
+Once a check completes, its result is stored in `health_check_results`. An
+endpoint is `healthy` only when the returned HTTP status exactly matches its
+configured `expected_status_code`; timeouts, request failures, and mismatched
+statuses set it to `unhealthy`. The endpoint's `last_checked_at` and
+`next_check_at` fields are updated with the result. The scheduler currently
+uses an in-memory ongoing-check set and is intended to run as one service
+process.
+
+### List endpoints
+
+```bash
+curl http://127.0.0.1:8000/endpoints
+```
+
+It returns `200 OK` and an array of registered endpoint objects in creation
+order.
+
+### Remove an endpoint
+
+```bash
+curl --request DELETE http://127.0.0.1:8000/endpoints/e18e671d-8f3e-4d2c-b3d8-6d540f8e52e8
+```
+
+It returns `204 No Content`; an unknown ID returns `404 Not Found`.
+
 ## Test
 
 ```bash

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 import psycopg
 from psycopg.rows import dict_row
 
@@ -17,11 +19,29 @@ CREATE TABLE IF NOT EXISTS endpoints (
     check_interval_seconds INTEGER NOT NULL CHECK (check_interval_seconds > 0),
     expected_status_code SMALLINT NOT NULL
         CHECK (expected_status_code BETWEEN 100 AND 599),
-    current_state TEXT NOT NULL,
+    current_state TEXT NOT NULL
+        CHECK (current_state IN ('pending', 'healthy', 'unhealthy')),
     last_checked_at TIMESTAMPTZ NULL,
     next_check_at TIMESTAMPTZ NULL,
     created_at TIMESTAMPTZ NOT NULL
 )
+"""
+
+HEALTH_CHECK_RESULTS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS health_check_results (
+    id UUID PRIMARY KEY,
+    endpoint_id UUID NOT NULL REFERENCES endpoints(id) ON DELETE CASCADE,
+    checked_at TIMESTAMPTZ NOT NULL,
+    status_code SMALLINT NULL CHECK (status_code BETWEEN 100 AND 599),
+    latency_ms INTEGER NOT NULL CHECK (latency_ms >= 0),
+    success BOOLEAN NOT NULL,
+    error TEXT NULL
+)
+"""
+
+HEALTH_CHECK_RESULTS_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS health_check_results_endpoint_checked_at_idx
+ON health_check_results (endpoint_id, checked_at DESC)
 """
 
 ENDPOINT_FIELDS = """
@@ -34,6 +54,14 @@ def initialize_endpoint_table() -> None:
     """Create the endpoint table when it has not already been created."""
     with psycopg.connect(DATABASE_URL, connect_timeout=3) as connection:
         connection.execute(ENDPOINTS_TABLE_SQL)
+
+
+def initialize_schema() -> None:
+    """Create all tables and indexes used by the service."""
+    with psycopg.connect(DATABASE_URL, connect_timeout=3) as connection:
+        connection.execute(ENDPOINTS_TABLE_SQL)
+        connection.execute(HEALTH_CHECK_RESULTS_TABLE_SQL)
+        connection.execute(HEALTH_CHECK_RESULTS_INDEX_SQL)
 
 
 def create_endpoint(
@@ -76,6 +104,74 @@ def list_endpoints() -> list[dict[str, object]]:
         with connection.cursor(row_factory=dict_row) as cursor:
             cursor.execute(query)
             return list(cursor.fetchall())
+
+
+def list_due_endpoints(now: datetime) -> list[dict[str, object]]:
+    """Return endpoints whose next check is due at the supplied UTC time."""
+    query = f"""
+    SELECT {ENDPOINT_FIELDS}
+    FROM endpoints
+    WHERE next_check_at IS NULL OR next_check_at <= %s
+    ORDER BY next_check_at ASC NULLS FIRST, created_at ASC, id ASC
+    """
+    with psycopg.connect(DATABASE_URL, connect_timeout=3) as connection:
+        with connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(query, (now,))
+            return list(cursor.fetchall())
+
+
+def record_health_check(
+    *,
+    result_id: object,
+    endpoint_id: object,
+    checked_at: datetime,
+    status_code: int | None,
+    latency_ms: int,
+    success: bool,
+    error: str | None,
+    check_interval_seconds: int,
+) -> dict[str, object]:
+    """Store a result and update its endpoint in one transaction."""
+    next_check_at = checked_at + timedelta(seconds=check_interval_seconds)
+    current_state = "healthy" if success else "unhealthy"
+
+    result_query = """
+    INSERT INTO health_check_results
+        (id, endpoint_id, checked_at, status_code, latency_ms, success, error)
+    VALUES (%s, %s, %s, %s, %s, %s, %s)
+    """
+    endpoint_query = f"""
+    UPDATE endpoints
+    SET current_state = %s, last_checked_at = %s, next_check_at = %s
+    WHERE id = %s
+    RETURNING {ENDPOINT_FIELDS}
+    """
+
+    with psycopg.connect(DATABASE_URL, connect_timeout=3) as connection:
+        connection.execute(ENDPOINTS_TABLE_SQL)
+        connection.execute(HEALTH_CHECK_RESULTS_TABLE_SQL)
+        with connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                result_query,
+                (
+                    result_id,
+                    endpoint_id,
+                    checked_at,
+                    status_code,
+                    latency_ms,
+                    success,
+                    error,
+                ),
+            )
+            cursor.execute(
+                endpoint_query,
+                (current_state, checked_at, next_check_at, endpoint_id),
+            )
+            endpoint = cursor.fetchone()
+
+    if endpoint is None:
+        raise LookupError(f"endpoint not found: {endpoint_id}")
+    return endpoint
 
 
 def delete_endpoint(endpoint_id: object) -> bool:
