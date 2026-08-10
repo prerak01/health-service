@@ -17,6 +17,42 @@ the exact dependency versions recorded there.
 
 ## Run
 
+### Start PostgreSQL
+
+Start PostgreSQL separately with Docker. This command creates a persistent named
+volume and exposes the database to the host application on port 5432:
+
+```bash
+docker run --detach \
+  --name health-service-postgres \
+  --publish 5432:5432 \
+  --volume health-service-postgres-data:/var/lib/postgresql/data \
+  --env POSTGRES_DB=health_service \
+  --env POSTGRES_USER=health_service \
+  --env POSTGRES_PASSWORD=health_service \
+  postgres:16-alpine
+```
+
+The service always uses the matching local connection URL:
+
+```text
+postgresql://health_service:health_service@127.0.0.1:5432/health_service
+```
+
+Stop and later restart the local database without losing data:
+
+```bash
+docker stop health-service-postgres
+docker start health-service-postgres
+```
+
+To discard all local PostgreSQL data, remove the container and its named volume:
+
+```bash
+docker rm health-service-postgres
+docker volume rm health-service-postgres-data
+```
+
 Start a normal service run:
 
 ```bash
@@ -34,6 +70,56 @@ The service listens on `http://127.0.0.1:8000`. `GET /health` returns:
 ```json
 {"status": "ok", "test_run": false}
 ```
+
+`GET /ready` verifies that PostgreSQL is reachable. It returns `200` when the
+database is connected and `503` when it is unavailable.
+
+## Endpoint API
+
+The service creates its `endpoints` table automatically when an endpoint API is
+first used. Endpoint registration stores configuration only; checks and
+scheduling are not yet part of the service.
+
+### Register an endpoint
+
+```bash
+curl --request POST http://127.0.0.1:8000/endpoints \
+  --header 'content-type: application/json' \
+  --data '{"url":"https://example.com/health","check_interval_seconds":30,"expected_status_code":200}'
+```
+
+It returns `201 Created` and the persisted endpoint. `id` and lifecycle fields
+are service-managed; a new endpoint starts in `pending` state.
+
+```json
+{
+  "id": "e18e671d-8f3e-4d2c-b3d8-6d540f8e52e8",
+  "url": "https://example.com/health",
+  "check_interval_seconds": 30,
+  "expected_status_code": 200,
+  "current_state": "pending",
+  "last_checked_at": null,
+  "next_check_at": null,
+  "created_at": "2026-08-10T12:00:00Z"
+}
+```
+
+### List endpoints
+
+```bash
+curl http://127.0.0.1:8000/endpoints
+```
+
+It returns `200 OK` and an array of registered endpoint objects in creation
+order.
+
+### Remove an endpoint
+
+```bash
+curl --request DELETE http://127.0.0.1:8000/endpoints/e18e671d-8f3e-4d2c-b3d8-6d540f8e52e8
+```
+
+It returns `204 No Content`; an unknown ID returns `404 Not Found`.
 
 ## Test
 

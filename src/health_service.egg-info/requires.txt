@@ -1,2 +1,3 @@
 fastapi<1.0,>=0.115
+psycopg[binary]<4.0,>=3.2
 uvicorn<1.0,>=0.30
