@@ -74,6 +74,53 @@ The service listens on `http://127.0.0.1:8000`. `GET /health` returns:
 `GET /ready` verifies that PostgreSQL is reachable. It returns `200` when the
 database is connected and `503` when it is unavailable.
 
+## Endpoint API
+
+The service creates its `endpoints` table automatically when an endpoint API is
+first used. Endpoint registration stores configuration only; checks and
+scheduling are not yet part of the service.
+
+### Register an endpoint
+
+```bash
+curl --request POST http://127.0.0.1:8000/endpoints \
+  --header 'content-type: application/json' \
+  --data '{"url":"https://example.com/health","check_interval_seconds":30,"expected_status_code":200}'
+```
+
+It returns `201 Created` and the persisted endpoint. `id` and lifecycle fields
+are service-managed; a new endpoint starts in `pending` state.
+
+```json
+{
+  "id": "e18e671d-8f3e-4d2c-b3d8-6d540f8e52e8",
+  "url": "https://example.com/health",
+  "check_interval_seconds": 30,
+  "expected_status_code": 200,
+  "current_state": "pending",
+  "last_checked_at": null,
+  "next_check_at": null,
+  "created_at": "2026-08-10T12:00:00Z"
+}
+```
+
+### List endpoints
+
+```bash
+curl http://127.0.0.1:8000/endpoints
+```
+
+It returns `200 OK` and an array of registered endpoint objects in creation
+order.
+
+### Remove an endpoint
+
+```bash
+curl --request DELETE http://127.0.0.1:8000/endpoints/e18e671d-8f3e-4d2c-b3d8-6d540f8e52e8
+```
+
+It returns `204 No Content`; an unknown ID returns `404 Not Found`.
+
 ## Test
 
 ```bash

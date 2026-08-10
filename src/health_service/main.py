@@ -4,12 +4,50 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+from datetime import UTC, datetime
+from typing import Annotated, Literal
+from uuid import UUID, uuid4
 
 import uvicorn
-from fastapi import FastAPI
+import psycopg
+from fastapi import FastAPI, HTTPException, Response, status
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, HttpUrl
 
-from health_service.database import is_database_ready
+from health_service.database import (
+    create_endpoint as persist_endpoint,
+    delete_endpoint as remove_endpoint,
+    is_database_ready,
+    list_endpoints as fetch_endpoints,
+)
+
+
+class EndpointCreateRequest(BaseModel):
+    """User-provided monitoring configuration for a new endpoint."""
+
+    url: HttpUrl
+    check_interval_seconds: Annotated[int, Field(gt=0)]
+    expected_status_code: Annotated[int, Field(ge=100, le=599)]
+
+
+class EndpointResponse(BaseModel):
+    """A stored endpoint configuration and its lifecycle metadata."""
+
+    id: UUID
+    url: str
+    check_interval_seconds: int
+    expected_status_code: int
+    current_state: Literal["pending"]
+    last_checked_at: datetime | None
+    next_check_at: datetime | None
+    created_at: datetime
+
+
+def _database_unavailable() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="database unavailable",
+    )
 
 
 def create_app(*, test_run: bool = False) -> FastAPI:
@@ -33,6 +71,43 @@ def create_app(*, test_run: bool = False) -> FastAPI:
             status_code=503,
             content={"status": "not_ready", "database": "unavailable"},
         )
+
+    @app.post(
+        "/endpoints",
+        response_model=EndpointResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_registered_endpoint(request: EndpointCreateRequest) -> dict[str, object]:
+        """Register and persist an endpoint to be monitored in the future."""
+        try:
+            return persist_endpoint(
+                endpoint_id=uuid4(),
+                url=str(request.url),
+                check_interval_seconds=request.check_interval_seconds,
+                expected_status_code=request.expected_status_code,
+                created_at=datetime.now(UTC),
+            )
+        except (OSError, ValueError, psycopg.Error) as error:
+            raise _database_unavailable() from error
+
+    @app.get("/endpoints", response_model=list[EndpointResponse])
+    def list_registered_endpoints() -> list[dict[str, object]]:
+        """List every registered endpoint in creation order."""
+        try:
+            return fetch_endpoints()
+        except (OSError, ValueError, psycopg.Error) as error:
+            raise _database_unavailable() from error
+
+    @app.delete("/endpoints/{endpoint_id}", status_code=status.HTTP_204_NO_CONTENT)
+    def delete_registered_endpoint(endpoint_id: UUID) -> Response:
+        """Remove a registered endpoint."""
+        try:
+            deleted = remove_endpoint(endpoint_id)
+        except (OSError, ValueError, psycopg.Error) as error:
+            raise _database_unavailable() from error
+        if not deleted:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="endpoint not found")
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     return app
 
