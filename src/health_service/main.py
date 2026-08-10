@@ -14,6 +14,7 @@ import psycopg
 from fastapi import FastAPI, HTTPException, Query, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, HttpUrl
+from prometheus_client import make_asgi_app
 
 from health_service.database import (
     create_endpoint as persist_endpoint,
@@ -117,6 +118,7 @@ def create_app(*, test_run: bool = False, enable_scheduler: bool = True) -> Fast
                 scheduler.stop()
 
     app = FastAPI(title="Health Service", lifespan=lifespan)
+    app.mount("/metrics", make_asgi_app())
 
     @app.get("/health")
     def health() -> dict[str, str | bool]:

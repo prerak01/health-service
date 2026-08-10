@@ -26,6 +26,16 @@ def test_health_reports_a_test_run() -> None:
     assert response.json() == {"status": "ok", "test_run": True}
 
 
+def test_metrics_endpoint_is_exposed() -> None:
+    client = TestClient(create_app(enable_scheduler=False))
+
+    response = client.get("/metrics")
+
+    assert response.status_code == 200
+    assert "health_service_health_checks_total" in response.text
+    assert "health_service_scheduler_tasks_pending" in response.text
+
+
 def test_ready_reports_database_connectivity(monkeypatch) -> None:
     monkeypatch.setattr("health_service.main.is_database_ready", lambda: True)
     client = TestClient(create_app(enable_scheduler=False))
