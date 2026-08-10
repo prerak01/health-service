@@ -4,6 +4,8 @@ from uuid import UUID, uuid4
 
 from urllib.error import HTTPError
 
+from prometheus_client import REGISTRY
+
 from health_service.scheduler import (
     HealthCheckResult,
     HealthCheckScheduler,
@@ -45,6 +47,22 @@ def result(endpoint_id: UUID = ENDPOINT_ID, *, success: bool = True) -> HealthCh
         success=success,
         error=None,
     )
+
+
+def no_response_result(endpoint_id: UUID = ENDPOINT_ID) -> HealthCheckResult:
+    return HealthCheckResult(
+        id=uuid4(),
+        endpoint_id=endpoint_id,
+        checked_at=CHECKED_AT,
+        status_code=None,
+        latency_ms=12,
+        success=False,
+        error="TimeoutError: request timed out",
+    )
+
+
+def metric_value(name: str, labels: dict[str, str] | None = None) -> float:
+    return REGISTRY.get_sample_value(name, labels=labels) or 0.0
 
 
 def test_execute_health_check_records_a_matching_status_code() -> None:
@@ -143,6 +161,76 @@ def test_scheduler_skips_ongoing_endpoints_and_reserves_before_submit() -> None:
     assert checked_ids == [second_id]
     assert persisted_ids == [second_id]
     assert scheduler.ongoing_check_ids == frozenset()
+
+
+def test_scheduler_records_checks_with_and_without_responses() -> None:
+    response_before = metric_value(
+        "health_service_health_checks_total",
+        {"outcome": "response"},
+    )
+    no_response_before = metric_value(
+        "health_service_health_checks_total",
+        {"outcome": "no_response"},
+    )
+
+    responding_scheduler = HealthCheckScheduler(
+        schema_initializer=lambda: None,
+        due_endpoint_loader=lambda now: [],
+        check_function=lambda current_endpoint: result(success=False),
+        result_persister=lambda **values: None,
+    )
+    failing_scheduler = HealthCheckScheduler(
+        schema_initializer=lambda: None,
+        due_endpoint_loader=lambda now: [],
+        check_function=lambda current_endpoint: no_response_result(),
+        result_persister=lambda **values: None,
+    )
+    try:
+        responding_scheduler._run_endpoint_check(endpoint())
+        failing_scheduler._run_endpoint_check(endpoint())
+    finally:
+        responding_scheduler.stop()
+        failing_scheduler.stop()
+
+    assert metric_value(
+        "health_service_health_checks_total",
+        {"outcome": "response"},
+    ) == response_before + 1
+    assert metric_value(
+        "health_service_health_checks_total",
+        {"outcome": "no_response"},
+    ) == no_response_before + 1
+
+
+def test_scheduler_tracks_pending_tasks() -> None:
+    started = Event()
+    release = Event()
+    first_endpoint = endpoint()
+    second_endpoint = endpoint(uuid4())
+    pending_before = metric_value("health_service_scheduler_tasks_pending")
+
+    def blocking_check(current_endpoint):
+        if current_endpoint["id"] == first_endpoint["id"]:
+            started.set()
+            assert release.wait(timeout=2)
+        return result(current_endpoint["id"])
+
+    scheduler = HealthCheckScheduler(
+        max_workers=1,
+        schema_initializer=lambda: None,
+        due_endpoint_loader=lambda now: [first_endpoint, second_endpoint],
+        check_function=blocking_check,
+        result_persister=lambda **values: None,
+    )
+    try:
+        scheduler.run_once(CHECKED_AT)
+        assert started.wait(timeout=2)
+        assert metric_value("health_service_scheduler_tasks_pending") == pending_before + 1
+    finally:
+        release.set()
+        scheduler.stop()
+
+    assert metric_value("health_service_scheduler_tasks_pending") == pending_before
 
 
 def test_scheduler_releases_endpoint_when_worker_fails() -> None:

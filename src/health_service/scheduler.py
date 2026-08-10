@@ -19,6 +19,10 @@ from health_service.database import (
     list_due_endpoints,
     record_health_check,
 )
+from health_service.metrics import (
+    SCHEDULER_TASKS_PENDING,
+    record_health_check as record_health_check_metric,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -191,12 +195,14 @@ class HealthCheckScheduler:
                     endpoint_id,
                 )
                 continue
+            SCHEDULER_TASKS_PENDING.inc()
             try:
-                self._executor.submit(self._run_endpoint_check, endpoint)
+                self._executor.submit(self._run_queued_endpoint_check, endpoint)
                 scheduled_count += 1
                 scheduler_logger.info("health check scheduled for endpoint %s", endpoint_id)
             except RuntimeError:
                 # This can happen if shutdown races with a scan.
+                SCHEDULER_TASKS_PENDING.dec()
                 self._release(endpoint_id)
                 logger.exception("unable to submit health check for %s", endpoint_id)
 
@@ -223,10 +229,16 @@ class HealthCheckScheduler:
         with self._ongoing_lock:
             self._ongoing_check_ids.discard(endpoint_id)
 
+    def _run_queued_endpoint_check(self, endpoint: EndpointRecord) -> None:
+        """Start a queued check and remove it from the pending count."""
+        SCHEDULER_TASKS_PENDING.dec()
+        self._run_endpoint_check(endpoint)
+
     def _run_endpoint_check(self, endpoint: EndpointRecord) -> None:
         endpoint_id = endpoint["id"]
         try:
             result = self._check_function(endpoint)
+            record_health_check_metric(result.status_code)
             outcome = "succeeded" if result.success else "failed"
             scheduler_logger.info(
                 "health check %s for endpoint %s: status_code=%s latency_ms=%s error=%s",

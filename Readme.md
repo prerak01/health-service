@@ -74,6 +74,18 @@ The service listens on `http://127.0.0.1:8000`. `GET /health` returns:
 `GET /ready` verifies that PostgreSQL is reachable. It returns `200` when the
 database is connected and `503` when it is unavailable.
 
+### Metrics
+
+The service exposes Prometheus-compatible metrics at `/metrics`:
+
+```bash
+curl http://127.0.0.1:8000/metrics/
+```
+
+The custom metrics include the number of pending scheduler tasks and health
+checks that received an HTTP response versus checks that received no response.
+The Prometheus client also exposes standard Python process metrics.
+
 ## Endpoint API
 
 The service creates its endpoint and health-check result tables automatically.
