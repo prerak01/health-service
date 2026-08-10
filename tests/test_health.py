@@ -9,7 +9,7 @@ from health_service.main import create_app
 
 
 def test_health_reports_a_normal_run() -> None:
-    client = TestClient(create_app())
+    client = TestClient(create_app(enable_scheduler=False))
 
     response = client.get("/health")
 
@@ -18,7 +18,7 @@ def test_health_reports_a_normal_run() -> None:
 
 
 def test_health_reports_a_test_run() -> None:
-    client = TestClient(create_app(test_run=True))
+    client = TestClient(create_app(test_run=True, enable_scheduler=False))
 
     response = client.get("/health")
 
@@ -28,7 +28,7 @@ def test_health_reports_a_test_run() -> None:
 
 def test_ready_reports_database_connectivity(monkeypatch) -> None:
     monkeypatch.setattr("health_service.main.is_database_ready", lambda: True)
-    client = TestClient(create_app())
+    client = TestClient(create_app(enable_scheduler=False))
 
     response = client.get("/ready")
 
@@ -38,7 +38,7 @@ def test_ready_reports_database_connectivity(monkeypatch) -> None:
 
 def test_ready_reports_unavailable_database(monkeypatch) -> None:
     monkeypatch.setattr("health_service.main.is_database_ready", lambda: False)
-    client = TestClient(create_app())
+    client = TestClient(create_app(enable_scheduler=False))
 
     response = client.get("/ready")
 
@@ -61,7 +61,7 @@ def test_create_endpoint_persists_and_returns_the_stored_record(monkeypatch) -> 
     }
     persist = MagicMock(return_value=persisted)
     monkeypatch.setattr("health_service.main.persist_endpoint", persist)
-    client = TestClient(create_app())
+    client = TestClient(create_app(enable_scheduler=False))
 
     response = client.post(
         "/endpoints",
@@ -88,7 +88,7 @@ def test_create_endpoint_persists_and_returns_the_stored_record(monkeypatch) -> 
 
 
 def test_create_endpoint_validates_its_configuration() -> None:
-    client = TestClient(create_app())
+    client = TestClient(create_app(enable_scheduler=False))
 
     response = client.post(
         "/endpoints",
@@ -116,7 +116,7 @@ def test_list_endpoints_returns_registered_records(monkeypatch) -> None:
         }
     ]
     monkeypatch.setattr("health_service.main.fetch_endpoints", lambda: endpoints)
-    client = TestClient(create_app())
+    client = TestClient(create_app(enable_scheduler=False))
 
     response = client.get("/endpoints")
 
@@ -127,7 +127,7 @@ def test_list_endpoints_returns_registered_records(monkeypatch) -> None:
 
 def test_list_endpoints_returns_an_empty_list(monkeypatch) -> None:
     monkeypatch.setattr("health_service.main.fetch_endpoints", lambda: [])
-    client = TestClient(create_app())
+    client = TestClient(create_app(enable_scheduler=False))
 
     response = client.get("/endpoints")
 
@@ -138,7 +138,7 @@ def test_list_endpoints_returns_an_empty_list(monkeypatch) -> None:
 def test_delete_endpoint_returns_no_content(monkeypatch) -> None:
     remove = MagicMock(return_value=True)
     monkeypatch.setattr("health_service.main.remove_endpoint", remove)
-    client = TestClient(create_app())
+    client = TestClient(create_app(enable_scheduler=False))
     endpoint_id = "e18e671d-8f3e-4d2c-b3d8-6d540f8e52e8"
 
     response = client.delete(f"/endpoints/{endpoint_id}")
@@ -150,7 +150,7 @@ def test_delete_endpoint_returns_no_content(monkeypatch) -> None:
 
 def test_delete_endpoint_returns_not_found_for_a_missing_id(monkeypatch) -> None:
     monkeypatch.setattr("health_service.main.remove_endpoint", lambda _: False)
-    client = TestClient(create_app())
+    client = TestClient(create_app(enable_scheduler=False))
 
     response = client.delete("/endpoints/e18e671d-8f3e-4d2c-b3d8-6d540f8e52e8")
 
@@ -162,7 +162,7 @@ def test_endpoint_routes_report_database_unavailability(monkeypatch) -> None:
         raise psycopg.OperationalError("database is unavailable")
 
     monkeypatch.setattr("health_service.main.fetch_endpoints", unavailable)
-    client = TestClient(create_app())
+    client = TestClient(create_app(enable_scheduler=False))
 
     response = client.get("/endpoints")
 
