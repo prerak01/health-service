@@ -122,6 +122,55 @@ curl http://127.0.0.1:8000/endpoints
 It returns `200 OK` and an array of registered endpoint objects in creation
 order.
 
+### Get health-check history
+
+```bash
+curl "http://127.0.0.1:8000/endpoints/e18e671d-8f3e-4d2c-b3d8-6d540f8e52e8/history?start_time=2026-08-10T00:00:00Z&end_time=2026-08-11T00:00:00Z"
+```
+
+Both `start_time` and `end_time` are required timezone-aware ISO-8601
+timestamps. The range is inclusive, and results are returned newest first:
+
+```json
+[
+  {
+    "id": "4c6c4087-f7c2-4114-93bf-a1bbd5377d8d",
+    "endpoint_id": "e18e671d-8f3e-4d2c-b3d8-6d540f8e52e8",
+    "checked_at": "2026-08-10T12:00:00Z",
+    "status_code": 200,
+    "latency_ms": 25,
+    "success": true,
+    "error": null
+  }
+]
+```
+
+An unregistered endpoint returns `404 Not Found`.
+
+### Get state transitions
+
+```bash
+curl "http://127.0.0.1:8000/endpoints/e18e671d-8f3e-4d2c-b3d8-6d540f8e52e8/transitions?start_time=2026-08-10T00:00:00Z&end_time=2026-08-11T00:00:00Z"
+```
+
+The same required inclusive time range is applied to `changed_at`. A newly
+registered endpoint records an initial `null` to `pending` event. Later events
+are recorded only when the endpoint changes state:
+
+```json
+[
+  {
+    "id": "4c6c4087-f7c2-4114-93bf-a1bbd5377d8d",
+    "endpoint_id": "e18e671d-8f3e-4d2c-b3d8-6d540f8e52e8",
+    "changed_at": "2026-08-10T12:00:00Z",
+    "from_state": "healthy",
+    "to_state": "unhealthy"
+  }
+]
+```
+
+An unregistered endpoint returns `404 Not Found`.
+
 ### Remove an endpoint
 
 ```bash
