@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 
 import uvicorn
 import psycopg
-from fastapi import FastAPI, HTTPException, Response, status
+from fastapi import FastAPI, HTTPException, Query, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, HttpUrl
 
@@ -19,9 +19,14 @@ from health_service.database import (
     create_endpoint as persist_endpoint,
     delete_endpoint as remove_endpoint,
     is_database_ready,
+    list_health_check_history as fetch_health_check_history,
     list_endpoints as fetch_endpoints,
+    list_state_transitions as fetch_state_transitions,
 )
 from health_service.scheduler import HealthCheckScheduler
+
+
+StateName = Literal["pending", "healthy", "unhealthy"]
 
 
 class EndpointCreateRequest(BaseModel):
@@ -39,10 +44,32 @@ class EndpointResponse(BaseModel):
     url: str
     check_interval_seconds: int
     expected_status_code: int
-    current_state: Literal["pending", "healthy", "unhealthy"]
+    current_state: StateName
     last_checked_at: datetime | None
     next_check_at: datetime | None
     created_at: datetime
+
+
+class HealthCheckHistoryResponse(BaseModel):
+    """A persisted result from one endpoint health check."""
+
+    id: UUID
+    endpoint_id: UUID
+    checked_at: datetime
+    status_code: int | None
+    latency_ms: int
+    success: bool
+    error: str | None
+
+
+class StateTransitionResponse(BaseModel):
+    """A persisted endpoint state transition event."""
+
+    id: UUID
+    endpoint_id: UUID
+    changed_at: datetime
+    from_state: StateName | None
+    to_state: StateName
 
 
 def _database_unavailable() -> HTTPException:
@@ -50,6 +77,29 @@ def _database_unavailable() -> HTTPException:
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         detail="database unavailable",
     )
+
+
+def _normalize_time_range(start_time: datetime, end_time: datetime) -> tuple[datetime, datetime]:
+    """Validate and normalize an inclusive, timezone-aware UTC time range."""
+    if start_time.tzinfo is None or start_time.utcoffset() is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="start_time must include a timezone",
+        )
+    if end_time.tzinfo is None or end_time.utcoffset() is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="end_time must include a timezone",
+        )
+
+    normalized_start = start_time.astimezone(UTC)
+    normalized_end = end_time.astimezone(UTC)
+    if normalized_start > normalized_end:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="start_time must be before or equal to end_time",
+        )
+    return normalized_start, normalized_end
 
 
 def create_app(*, test_run: bool = False, enable_scheduler: bool = True) -> FastAPI:
@@ -96,6 +146,7 @@ def create_app(*, test_run: bool = False, enable_scheduler: bool = True) -> Fast
         try:
             return persist_endpoint(
                 endpoint_id=uuid4(),
+                transition_id=uuid4(),
                 url=str(request.url),
                 check_interval_seconds=request.check_interval_seconds,
                 expected_status_code=request.expected_status_code,
@@ -122,6 +173,56 @@ def create_app(*, test_run: bool = False, enable_scheduler: bool = True) -> Fast
         if not deleted:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="endpoint not found")
         return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.get(
+        "/endpoints/{endpoint_id}/history",
+        response_model=list[HealthCheckHistoryResponse],
+    )
+    def get_endpoint_history(
+        endpoint_id: UUID,
+        start_time: datetime = Query(..., description="Inclusive range start."),
+        end_time: datetime = Query(..., description="Inclusive range end."),
+    ) -> list[dict[str, object]]:
+        """Return health-check results for an endpoint in a time range."""
+        normalized_start, normalized_end = _normalize_time_range(start_time, end_time)
+        try:
+            return fetch_health_check_history(
+                endpoint_id,
+                start_time=normalized_start,
+                end_time=normalized_end,
+            )
+        except LookupError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="endpoint not found",
+            ) from error
+        except (OSError, ValueError, psycopg.Error) as error:
+            raise _database_unavailable() from error
+
+    @app.get(
+        "/endpoints/{endpoint_id}/transitions",
+        response_model=list[StateTransitionResponse],
+    )
+    def get_endpoint_state_transitions(
+        endpoint_id: UUID,
+        start_time: datetime = Query(..., description="Inclusive range start."),
+        end_time: datetime = Query(..., description="Inclusive range end."),
+    ) -> list[dict[str, object]]:
+        """Return state transitions for an endpoint in a time range."""
+        normalized_start, normalized_end = _normalize_time_range(start_time, end_time)
+        try:
+            return fetch_state_transitions(
+                endpoint_id,
+                start_time=normalized_start,
+                end_time=normalized_end,
+            )
+        except LookupError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="endpoint not found",
+            ) from error
+        except (OSError, ValueError, psycopg.Error) as error:
+            raise _database_unavailable() from error
 
     return app
 
