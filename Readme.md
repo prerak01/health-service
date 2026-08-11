@@ -85,6 +85,9 @@ kubectl --namespace health-service \
 See the [API usage guide](docs/apiusage.md) for all supported endpoints with
 sample requests and responses.
 
+See the [MVP architecture document](docs/architecture.md) for the datastore
+choice, component design, operational behavior, and architectural tradeoffs.
+
 ### 4. Clean up
 
 ```bash
