@@ -5,7 +5,19 @@ from uuid import UUID
 import psycopg
 from fastapi.testclient import TestClient
 
-from health_service.main import create_app
+from health_service.main import create_app, run
+
+
+def test_run_uses_configured_host_and_port(monkeypatch) -> None:
+    uvicorn_run = MagicMock()
+    monkeypatch.setattr("health_service.main.uvicorn.run", uvicorn_run)
+    monkeypatch.setenv("HEALTH_SERVICE_HOST", "0.0.0.0")
+    monkeypatch.setenv("HEALTH_SERVICE_PORT", "9000")
+
+    run([])
+
+    assert uvicorn_run.call_args.kwargs["host"] == "0.0.0.0"
+    assert uvicorn_run.call_args.kwargs["port"] == 9000
 
 
 def test_health_reports_a_normal_run() -> None:

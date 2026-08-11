@@ -6,6 +6,7 @@ import argparse
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+import os
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
@@ -28,6 +29,9 @@ from health_service.scheduler import HealthCheckScheduler
 
 
 StateName = Literal["pending", "healthy", "unhealthy"]
+
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8000
 
 
 class EndpointCreateRequest(BaseModel):
@@ -246,7 +250,11 @@ def parse_args(args: Sequence[str] | None = None) -> argparse.Namespace:
 def run(args: Sequence[str] | None = None) -> None:
     """Start the HTTP service."""
     options = parse_args(args)
-    uvicorn.run(create_app(test_run=options.test_run), host="127.0.0.1", port=8000)
+    host = os.environ.get("HEALTH_SERVICE_HOST", DEFAULT_HOST)
+    port = int(os.environ.get("HEALTH_SERVICE_PORT", str(DEFAULT_PORT)))
+    if not 1 <= port <= 65535:
+        raise ValueError("HEALTH_SERVICE_PORT must be between 1 and 65535")
+    uvicorn.run(create_app(test_run=options.test_run), host=host, port=port)
 
 
 if __name__ == "__main__":
