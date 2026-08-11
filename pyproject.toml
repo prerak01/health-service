@@ -19,6 +19,7 @@ dependencies = [
 dev = [
     "httpx>=0.27,<1.0",
     "pytest>=8.0,<9.0",
+    "testcontainers[postgres]>=4.13,<5.0",
 ]
 
 [project.scripts]
@@ -26,6 +27,9 @@ health-service = "health_service.main:run"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "integration: tests that exercise the service with real external dependencies",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
