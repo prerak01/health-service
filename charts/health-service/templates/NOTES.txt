@@ -1,0 +1,15 @@
+The health service and its PostgreSQL datastore are installed.
+
+Wait for both workloads:
+  kubectl --namespace {{ .Release.Namespace }} get pods --watch
+
+Forward the application service to localhost:
+  kubectl --namespace {{ .Release.Namespace }} port-forward service/{{ include "health-service.fullname" . }} 8000:{{ .Values.service.port }}
+
+Then verify it:
+  curl http://127.0.0.1:8000/health
+  curl http://127.0.0.1:8000/ready
+  curl http://127.0.0.1:8000/metrics/
+
+Run the packaged connection test:
+  helm test {{ .Release.Name }} --namespace {{ .Release.Namespace }}

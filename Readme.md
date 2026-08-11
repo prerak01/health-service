@@ -1,12 +1,19 @@
 # Health Service
 
-## Prerequisite
+## Prerequisites
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/). It
-downloads and manages the project-pinned Python 3.13.15 interpreter, so the
-service does not depend on the system Python installation.
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) only if
+you want to run the Python development workflow or tests locally. It downloads
+and manages the project-pinned Python 3.13.15 interpreter.
 
-## Setup
+The local Kubernetes workflow requires:
+
+- [Docker](https://docs.docker.com/engine/install/)
+- [kind](https://kind.sigs.k8s.io/docs/user/quick-start/#installation)
+- [kubectl](https://kubernetes.io/docs/tasks/tools/)
+- [Helm 3](https://helm.sh/docs/intro/install/)
+
+## Python development setup (optional)
 
 ```bash
 uv sync --locked
@@ -15,76 +22,125 @@ uv sync --locked
 `uv.lock` is committed to the repository. The `--locked` option installs only
 the exact dependency versions recorded there.
 
-## Run
+## Local deployment with kind and Helm
 
-### Start PostgreSQL
+The Helm chart is the Kubernetes source of truth; no separate raw manifest set
+is maintained. It deploys one application `Deployment`, one PostgreSQL
+`StatefulSet`, their internal Services, a Secret, and one persistent volume
+claim. PostgreSQL starts automatically with the application, and the service
+creates its database tables automatically after startup.
 
-Start PostgreSQL separately with Docker. This command creates a persistent named
-volume and exposes the database to the host application on port 5432:
-
-```bash
-docker run --detach \
-  --name health-service-postgres \
-  --publish 5432:5432 \
-  --volume health-service-postgres-data:/var/lib/postgresql/data \
-  --env POSTGRES_DB=health_service \
-  --env POSTGRES_USER=health_service \
-  --env POSTGRES_PASSWORD=health_service \
-  postgres:16-alpine
-```
-
-The service always uses the matching local connection URL:
-
-```text
-postgresql://health_service:health_service@127.0.0.1:5432/health_service
-```
-
-Stop and later restart the local database without losing data:
+### 1. Build the image, create the cluster, and load the image
 
 ```bash
-docker stop health-service-postgres
-docker start health-service-postgres
+docker build --tag health-service:0.1.0 .
+kind create cluster --name health-service
+kind load docker-image health-service:0.1.0 --name health-service
 ```
 
-To discard all local PostgreSQL data, remove the container and its named volume:
+Loading the locally built image avoids needing a registry. The chart uses
+`IfNotPresent`, so Kubernetes uses the image loaded into the kind node.
+
+### 2. Install the chart
 
 ```bash
-docker rm health-service-postgres
-docker volume rm health-service-postgres-data
+helm upgrade --install health-service charts/health-service \
+  --namespace health-service \
+  --create-namespace \
+  --wait \
+  --timeout 3m
 ```
 
-Start a normal service run:
+The default database password is intentionally only a local demo credential.
+Override it on the first install when needed:
 
 ```bash
-uv run health-service
+helm upgrade --install health-service charts/health-service \
+  --namespace health-service \
+  --create-namespace \
+  --set-string postgresql.auth.password=a-local-password \
+  --wait
 ```
 
-Start a test run:
+PostgreSQL initialization variables only apply to an empty data directory. Do
+not change this value later while retaining the existing PVC unless the
+database password is also migrated.
+
+### 3. Inspect and access the service
 
 ```bash
-uv run health-service --test-run
+kubectl --namespace health-service get pods,services,pvc
+kubectl --namespace health-service logs deployment/health-service
+kubectl --namespace health-service logs statefulset/health-service-postgresql
+helm test health-service --namespace health-service --logs
 ```
 
-The service listens on `http://127.0.0.1:8000`. `GET /health` returns:
-
-```json
-{"status": "ok", "test_run": false}
-```
-
-`GET /ready` verifies that PostgreSQL is reachable. It returns `200` when the
-database is connected and `503` when it is unavailable.
-
-### Metrics
-
-The service exposes Prometheus-compatible metrics at `/metrics`:
+Forward the ClusterIP Service in a dedicated terminal:
 
 ```bash
+kubectl --namespace health-service \
+  port-forward service/health-service 8000:8000
+```
+
+Then inspect the operational endpoints:
+
+```bash
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/ready
 curl http://127.0.0.1:8000/metrics/
 ```
 
-The custom metrics include the number of pending scheduler tasks and health
-checks that received an HTTP response versus checks that received no response.
-The Prometheus client also exposes standard Python process metrics.
+The service exposes Prometheus-compatible metrics at `/metrics`. Custom metrics
+include pending scheduler tasks and health checks that received an HTTP response
+versus checks that received no response. The Prometheus client also exposes
+standard Python process metrics.
+
+### 4. Exercise check, store, and query
+
+Register the application's in-cluster health endpoint so the check is
+deterministic and does not depend on Internet access:
+
+```bash
+curl --request POST http://127.0.0.1:8000/endpoints \
+  --header 'content-type: application/json' \
+  --data '{"url":"http://health-service:8000/health","check_interval_seconds":5,"expected_status_code":200}'
+```
+
+Copy the returned `id`, wait at least ten seconds, and use it below:
+
+```bash
+ENDPOINT_ID=replace-with-returned-id
+
+curl http://127.0.0.1:8000/endpoints
+curl --get "http://127.0.0.1:8000/endpoints/${ENDPOINT_ID}/history" \
+  --data-urlencode 'start_time=2020-01-01T00:00:00Z' \
+  --data-urlencode 'end_time=2100-01-01T00:00:00Z'
+```
+
+### 5. Verify persistence
+
+Delete only the PostgreSQL pod and wait for its StatefulSet replacement:
+
+```bash
+kubectl --namespace health-service delete pod health-service-postgresql-0
+kubectl --namespace health-service rollout status \
+  statefulset/health-service-postgresql --timeout=2m
+```
+
+After `/ready` returns `200` again, list the endpoints and history. The records
+should remain because the replacement pod reuses the same PVC.
+
+### 6. Clean up
+
+```bash
+helm uninstall health-service --namespace health-service
+kubectl --namespace health-service delete pvc data-health-service-postgresql-0
+kind delete cluster --name health-service
+```
+
+Helm intentionally leaves StatefulSet claims behind on uninstall. Delete the
+PVC explicitly only when its stored history is no longer needed. Deleting the
+kind cluster also removes all storage belonging to that cluster.
 
 ## Endpoint API
 

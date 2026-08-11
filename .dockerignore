@@ -1,0 +1,12 @@
+.git
+.gitignore
+.pytest_cache
+.python-version
+.venv
+**/__pycache__
+**/*.egg-info
+*.py[cod]
+charts
+dist
+instructions.pdf
+tests

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import os
 
 import psycopg
 from psycopg.rows import dict_row
@@ -11,6 +12,11 @@ from psycopg.rows import dict_row
 DATABASE_URL = (
     "postgresql://health_service:health_service@127.0.0.1:5432/health_service"
 )
+
+
+def get_database_url() -> str:
+    """Return the configured PostgreSQL connection URL."""
+    return os.environ.get("DATABASE_URL", DATABASE_URL)
 
 ENDPOINTS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS endpoints (
@@ -78,13 +84,13 @@ id, endpoint_id, changed_at, from_state, to_state
 
 def initialize_endpoint_table() -> None:
     """Create the endpoint table when it has not already been created."""
-    with psycopg.connect(DATABASE_URL, connect_timeout=3) as connection:
+    with psycopg.connect(get_database_url(), connect_timeout=3) as connection:
         connection.execute(ENDPOINTS_TABLE_SQL)
 
 
 def initialize_schema() -> None:
     """Create all tables and indexes used by the service."""
-    with psycopg.connect(DATABASE_URL, connect_timeout=3) as connection:
+    with psycopg.connect(get_database_url(), connect_timeout=3) as connection:
         connection.execute(ENDPOINTS_TABLE_SQL)
         connection.execute(HEALTH_CHECK_RESULTS_TABLE_SQL)
         connection.execute(HEALTH_CHECK_RESULTS_INDEX_SQL)
@@ -107,7 +113,7 @@ def create_endpoint(
     VALUES (%s, %s, %s, %s, 'pending', NULL, NULL, %s)
     RETURNING {ENDPOINT_FIELDS}
     """
-    with psycopg.connect(DATABASE_URL, connect_timeout=3) as connection:
+    with psycopg.connect(get_database_url(), connect_timeout=3) as connection:
         connection.execute(ENDPOINTS_TABLE_SQL)
         connection.execute(ENDPOINT_STATE_TRANSITIONS_TABLE_SQL)
         connection.execute(ENDPOINT_STATE_TRANSITIONS_INDEX_SQL)
@@ -139,7 +145,7 @@ def create_endpoint(
 def list_endpoints() -> list[dict[str, object]]:
     """Return registered endpoints in their creation order."""
     query = f"SELECT {ENDPOINT_FIELDS} FROM endpoints ORDER BY created_at ASC, id ASC"
-    with psycopg.connect(DATABASE_URL, connect_timeout=3) as connection:
+    with psycopg.connect(get_database_url(), connect_timeout=3) as connection:
         connection.execute(ENDPOINTS_TABLE_SQL)
         with connection.cursor(row_factory=dict_row) as cursor:
             cursor.execute(query)
@@ -154,7 +160,7 @@ def list_due_endpoints(now: datetime) -> list[dict[str, object]]:
     WHERE next_check_at IS NULL OR next_check_at <= %s
     ORDER BY next_check_at ASC NULLS FIRST, created_at ASC, id ASC
     """
-    with psycopg.connect(DATABASE_URL, connect_timeout=3) as connection:
+    with psycopg.connect(get_database_url(), connect_timeout=3) as connection:
         with connection.cursor(row_factory=dict_row) as cursor:
             cursor.execute(query, (now,))
             return list(cursor.fetchall())
@@ -187,7 +193,7 @@ def record_health_check(
     RETURNING {ENDPOINT_FIELDS}
     """
 
-    with psycopg.connect(DATABASE_URL, connect_timeout=3) as connection:
+    with psycopg.connect(get_database_url(), connect_timeout=3) as connection:
         connection.execute(ENDPOINTS_TABLE_SQL)
         connection.execute(HEALTH_CHECK_RESULTS_TABLE_SQL)
         connection.execute(ENDPOINT_STATE_TRANSITIONS_TABLE_SQL)
@@ -254,7 +260,7 @@ def list_health_check_history(
       AND checked_at <= %s
     ORDER BY checked_at DESC, id DESC
     """
-    with psycopg.connect(DATABASE_URL, connect_timeout=3) as connection:
+    with psycopg.connect(get_database_url(), connect_timeout=3) as connection:
         connection.execute(ENDPOINTS_TABLE_SQL)
         connection.execute(HEALTH_CHECK_RESULTS_TABLE_SQL)
         with connection.cursor(row_factory=dict_row) as cursor:
@@ -280,7 +286,7 @@ def list_state_transitions(
       AND changed_at <= %s
     ORDER BY changed_at DESC, id DESC
     """
-    with psycopg.connect(DATABASE_URL, connect_timeout=3) as connection:
+    with psycopg.connect(get_database_url(), connect_timeout=3) as connection:
         connection.execute(ENDPOINTS_TABLE_SQL)
         connection.execute(ENDPOINT_STATE_TRANSITIONS_TABLE_SQL)
         with connection.cursor(row_factory=dict_row) as cursor:
@@ -293,7 +299,7 @@ def list_state_transitions(
 
 def delete_endpoint(endpoint_id: object) -> bool:
     """Delete an endpoint, returning whether a record was removed."""
-    with psycopg.connect(DATABASE_URL, connect_timeout=3) as connection:
+    with psycopg.connect(get_database_url(), connect_timeout=3) as connection:
         connection.execute(ENDPOINTS_TABLE_SQL)
         with connection.cursor() as cursor:
             cursor.execute("DELETE FROM endpoints WHERE id = %s", (endpoint_id,))
@@ -303,7 +309,7 @@ def delete_endpoint(endpoint_id: object) -> bool:
 def is_database_ready() -> bool:
     """Check whether PostgreSQL can accept and execute a simple query."""
     try:
-        with psycopg.connect(DATABASE_URL, connect_timeout=3) as connection:
+        with psycopg.connect(get_database_url(), connect_timeout=3) as connection:
             connection.execute("SELECT 1")
     except (OSError, ValueError, psycopg.Error):
         return False

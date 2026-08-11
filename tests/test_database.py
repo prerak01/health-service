@@ -7,12 +7,26 @@ import psycopg
 from health_service.database import (
     DATABASE_URL,
     create_endpoint,
+    get_database_url,
     is_database_ready,
     list_health_check_history,
     list_due_endpoints,
     list_state_transitions,
     record_health_check,
 )
+
+
+def test_database_url_uses_local_default(monkeypatch) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    assert get_database_url() == DATABASE_URL
+
+
+def test_database_url_can_be_configured(monkeypatch) -> None:
+    configured_url = "postgresql://configured:secret@postgresql:5432/configured"
+    monkeypatch.setenv("DATABASE_URL", configured_url)
+
+    assert get_database_url() == configured_url
 
 
 def test_database_readiness_executes_a_simple_query(monkeypatch) -> None:
