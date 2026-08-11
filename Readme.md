@@ -248,7 +248,13 @@ curl --request DELETE http://127.0.0.1:8000/endpoints/e18e671d-8f3e-4d2c-b3d8-6d
 It returns `204 No Content`; an unknown ID returns `404 Not Found`.
 
 ## Test
-
+For running all unit tests and integration tests
 ```bash
 uv run pytest
+```
+
+Run only the integration test with:
+
+```bash
+uv run pytest -m integration
 ```

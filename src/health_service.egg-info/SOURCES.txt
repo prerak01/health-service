@@ -13,4 +13,5 @@ src/health_service.egg-info/requires.txt
 src/health_service.egg-info/top_level.txt
 tests/test_database.py
 tests/test_health.py
+tests/test_integration.py
 tests/test_scheduler.py
