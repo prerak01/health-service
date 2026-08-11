@@ -26,16 +26,7 @@ def test_health_reports_a_normal_run() -> None:
     response = client.get("/health")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "test_run": False}
-
-
-def test_health_reports_a_test_run() -> None:
-    client = TestClient(create_app(test_run=True, enable_scheduler=False))
-
-    response = client.get("/health")
-
-    assert response.status_code == 200
-    assert response.json() == {"status": "ok", "test_run": True}
+    assert response.json() == {"status": "ok"}
 
 
 def test_metrics_endpoint_is_exposed() -> None:

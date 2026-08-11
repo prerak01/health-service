@@ -81,16 +81,10 @@ Start a normal service run:
 uv run health-service
 ```
 
-Start a test run:
-
-```bash
-uv run health-service --test-run
-```
-
 The service listens on `http://127.0.0.1:8000`. `GET /health` returns:
 
 ```json
-{"status": "ok", "test_run": false}
+{"status": "ok"}
 ```
 
 `GET /ready` verifies that PostgreSQL is reachable. It returns `200` when the
@@ -254,12 +248,9 @@ kubectl --namespace health-service rollout status \
 After `/ready` returns `200` again, list the endpoints and history. The records
 should remain because the replacement pod reuses the same PVC.
 
-### 6. Package and clean up
+### 6. Clean up
 
 ```bash
-mkdir -p dist
-helm package charts/health-service --destination dist
-
 helm uninstall health-service --namespace health-service
 kubectl --namespace health-service delete pvc data-health-service-postgresql-0
 kind delete cluster --name health-service
