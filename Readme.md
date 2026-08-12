@@ -66,6 +66,21 @@ PostgreSQL initialization variables only apply to an empty data directory. Do
 not change this value later while retaining the existing PVC unless the
 database password is also migrated.
 
+Outbound health checks are limited to 10 request starts per second for each
+destination by default. Checks whose URLs share a normalized hostname and
+effective port share the same limit, regardless of path. Override the limit
+with Helm when necessary:
+
+```bash
+helm upgrade --install health-service charts/health-service \
+  --namespace health-service \
+  --set outboundRateLimit.requestsPerSecond=20
+```
+
+When running the Python service directly, set the equivalent positive integer
+environment variable `HEALTH_SERVICE_OUTBOUND_RATE_LIMIT_RPS`. The token-bucket
+burst capacity equals the configured requests-per-second value.
+
 ### 3. Inspect and access the service
 
 ```bash
@@ -107,3 +122,13 @@ Run only the integration test with:
 ```bash
 uv run pytest -m integration
 ```
+
+## Bonus
+
+- Added a [data retention policy](docs/retention.md), an [operations runbook](docs/runbook.md),
+  and configurable per-destination outbound rate limiting. Outbound checks use
+  a process-local token bucket keyed by normalized hostname and effective port,
+  allowing 10 request starts per second per destination by default while
+  sharing the limit across paths. The limit is configurable through Helm or
+  `HEALTH_SERVICE_OUTBOUND_RATE_LIMIT_RPS`; rate-limited checks wait
+  interruptibly before starting and log the time spent waiting.

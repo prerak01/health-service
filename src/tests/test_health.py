@@ -5,7 +5,7 @@ from uuid import UUID
 import psycopg
 from fastapi.testclient import TestClient
 
-from health_service.main import create_app, run
+from health_service.main import _outbound_rate_limit_rps, create_app, run
 
 
 def test_run_uses_configured_host_and_port(monkeypatch) -> None:
@@ -18,6 +18,27 @@ def test_run_uses_configured_host_and_port(monkeypatch) -> None:
 
     assert uvicorn_run.call_args.kwargs["host"] == "0.0.0.0"
     assert uvicorn_run.call_args.kwargs["port"] == 9000
+
+
+def test_outbound_rate_limit_uses_default_and_environment(monkeypatch) -> None:
+    monkeypatch.delenv("HEALTH_SERVICE_OUTBOUND_RATE_LIMIT_RPS", raising=False)
+    assert _outbound_rate_limit_rps() == 10
+
+    monkeypatch.setenv("HEALTH_SERVICE_OUTBOUND_RATE_LIMIT_RPS", "25")
+    assert _outbound_rate_limit_rps() == 25
+
+
+def test_outbound_rate_limit_rejects_invalid_values(monkeypatch) -> None:
+    for value in ("0", "-1", "1.5", "many"):
+        monkeypatch.setenv("HEALTH_SERVICE_OUTBOUND_RATE_LIMIT_RPS", value)
+        try:
+            _outbound_rate_limit_rps()
+        except ValueError as error:
+            assert str(error) == (
+                "HEALTH_SERVICE_OUTBOUND_RATE_LIMIT_RPS must be a positive integer"
+            )
+        else:
+            raise AssertionError(f"expected {value!r} to be rejected")
 
 
 def test_health_reports_a_normal_run() -> None:

@@ -131,7 +131,9 @@ query shape matches the existing endpoint-and-time-range history API. The
 default policy keeps raw results for 30 days (4.32 billion rows), hourly
 availability aggregates and transitions for 13 months, and compressed Parquet
 archives in S3-compatible object storage for one year. Retention is enforced
-with table TTLs and object lifecycle rules rather than application deletes.
+with time-partition expiry and object lifecycle rules rather than application
+row deletes. The [data retention strategy](retention.md) defines the lifecycle,
+archive verification, failure handling, and operational safeguards in detail.
 
 ## Failure modes and recovery
 

@@ -9,8 +9,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from threading import Event, Lock, Thread
 from time import monotonic
-from typing import cast
+from typing import Protocol, cast
 from urllib.error import HTTPError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 from uuid import UUID, uuid4
 
@@ -31,6 +32,7 @@ scheduler_logger = logging.getLogger("uvicorn.error")
 SCHEDULER_INTERVAL_SECONDS = 5.0
 HEALTH_CHECK_TIMEOUT_SECONDS = 2.0
 MAX_WORKERS = 50
+DEFAULT_OUTBOUND_RATE_LIMIT_RPS = 10
 
 EndpointRecord = Mapping[str, object]
 NowProvider = Callable[[], datetime]
@@ -38,6 +40,94 @@ DueEndpointLoader = Callable[[datetime], list[EndpointRecord]]
 SchemaInitializer = Callable[[], None]
 HealthCheckPersister = Callable[..., object]
 HealthCheckFunction = Callable[[EndpointRecord], "HealthCheckResult"]
+RateLimitWaiter = Callable[[Event, float], bool]
+
+
+class OutboundRateLimiter(Protocol):
+    """Wait for permission to start an outbound request."""
+
+    def acquire(self, url: str, stop_event: Event) -> float | None:
+        """Return seconds waited, or None when shutdown cancels the wait."""
+        ...
+
+
+@dataclass(slots=True)
+class _TokenBucket:
+    tokens: float
+    last_refill: float
+    lock: Lock
+
+
+class TokenBucketRateLimiter:
+    """Apply a token-bucket request-start limit per destination."""
+
+    def __init__(
+        self,
+        requests_per_second: int = DEFAULT_OUTBOUND_RATE_LIMIT_RPS,
+        *,
+        monotonic_clock: Callable[[], float] = monotonic,
+        waiter: RateLimitWaiter | None = None,
+    ) -> None:
+        if requests_per_second <= 0:
+            raise ValueError("requests_per_second must be greater than zero")
+        self.requests_per_second = requests_per_second
+        self.capacity = float(requests_per_second)
+        self._monotonic_clock = monotonic_clock
+        self._waiter = waiter or (lambda stop_event, delay: stop_event.wait(delay))
+        self._buckets: dict[tuple[str, int], _TokenBucket] = {}
+        self._buckets_lock = Lock()
+
+    @staticmethod
+    def destination_key(url: str) -> tuple[str, int]:
+        """Return normalized hostname and effective port for an HTTP URL."""
+        parsed = urlsplit(url)
+        scheme = parsed.scheme.lower()
+        hostname = parsed.hostname
+        if hostname is None or scheme not in {"http", "https"}:
+            raise ValueError(f"unsupported health-check URL: {url}")
+        port = parsed.port
+        if port is None:
+            port = 443 if scheme == "https" else 80
+        return hostname.lower(), port
+
+    def acquire(self, url: str, stop_event: Event) -> float | None:
+        """Consume one token, waiting interruptibly for a refill when needed."""
+        started_at = self._monotonic_clock()
+        bucket = self._bucket_for(self.destination_key(url), started_at)
+        waited_seconds = 0.0
+
+        while True:
+            with bucket.lock:
+                now = self._monotonic_clock()
+                elapsed = max(0.0, now - bucket.last_refill)
+                bucket.tokens = min(
+                    self.capacity,
+                    bucket.tokens + elapsed * self.requests_per_second,
+                )
+                bucket.last_refill = now
+                # Treat sub-nanotoken rounding differences as a full token so
+                # a completed wait cannot spin forever at the boundary.
+                if bucket.tokens >= 1.0 - 1e-9:
+                    bucket.tokens = max(0.0, bucket.tokens - 1.0)
+                    return waited_seconds
+                delay = (1.0 - bucket.tokens) / self.requests_per_second
+
+            wait_started_at = self._monotonic_clock()
+            if self._waiter(stop_event, delay):
+                return None
+            waited_seconds += max(0.0, self._monotonic_clock() - wait_started_at)
+
+    def _bucket_for(self, key: tuple[str, int], now: float) -> _TokenBucket:
+        with self._buckets_lock:
+            bucket = self._buckets.get(key)
+            if bucket is None:
+                bucket = _TokenBucket(
+                    tokens=self.capacity,
+                    last_refill=now,
+                    lock=Lock(),
+                )
+                self._buckets[key] = bucket
+            return bucket
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +206,7 @@ class HealthCheckScheduler:
         due_endpoint_loader: DueEndpointLoader = list_due_endpoints,
         check_function: HealthCheckFunction = execute_health_check,
         result_persister: HealthCheckPersister = record_health_check,
+        rate_limiter: OutboundRateLimiter | None = None,
         now_provider: NowProvider | None = None,
     ) -> None:
         self.scan_interval_seconds = scan_interval_seconds
@@ -124,6 +215,9 @@ class HealthCheckScheduler:
         self._due_endpoint_loader = due_endpoint_loader
         self._check_function = check_function
         self._result_persister = result_persister
+        self._rate_limiter = (
+            rate_limiter if rate_limiter is not None else TokenBucketRateLimiter()
+        )
         self._now_provider = now_provider or _utc_now
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
         self._stop_event = Event()
@@ -237,6 +331,22 @@ class HealthCheckScheduler:
     def _run_endpoint_check(self, endpoint: EndpointRecord) -> None:
         endpoint_id = endpoint["id"]
         try:
+            waited_seconds = self._rate_limiter.acquire(
+                str(endpoint["url"]),
+                self._stop_event,
+            )
+            if waited_seconds is None:
+                scheduler_logger.info(
+                    "health check cancelled while rate limited for endpoint %s",
+                    endpoint_id,
+                )
+                return
+            if waited_seconds > 0:
+                scheduler_logger.info(
+                    "health check rate limited for endpoint %s: waited_seconds=%.3f",
+                    endpoint_id,
+                    waited_seconds,
+                )
             result = self._check_function(endpoint)
             record_health_check_metric(result.status_code)
             outcome = "succeeded" if result.success else "failed"
