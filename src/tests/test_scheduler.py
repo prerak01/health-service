@@ -4,11 +4,13 @@ from uuid import UUID, uuid4
 
 from urllib.error import HTTPError
 
+import pytest
 from prometheus_client import REGISTRY
 
 from health_service.scheduler import (
     HealthCheckResult,
     HealthCheckScheduler,
+    TokenBucketRateLimiter,
     execute_health_check,
 )
 
@@ -26,6 +28,11 @@ class FakeResponse:
 
     def __exit__(self, exception_type, exception, traceback) -> None:
         return None
+
+
+class UnlimitedRateLimiter:
+    def acquire(self, url: str, stop_event: Event) -> float:
+        return 0.0
 
 
 def endpoint(endpoint_id: UUID = ENDPOINT_ID) -> dict[str, object]:
@@ -129,6 +136,86 @@ def test_execute_health_check_records_request_failures() -> None:
     assert check.error == "TimeoutError: request timed out"
 
 
+def test_token_bucket_allows_initial_burst_then_refills() -> None:
+    current_time = 100.0
+    waits: list[float] = []
+
+    def wait(stop_event: Event, delay: float) -> bool:
+        nonlocal current_time
+        waits.append(delay)
+        current_time += delay
+        return stop_event.is_set()
+
+    limiter = TokenBucketRateLimiter(
+        10,
+        monotonic_clock=lambda: current_time,
+        waiter=wait,
+    )
+    stop_event = Event()
+
+    immediate_waits = [
+        limiter.acquire("https://example.com/health", stop_event)
+        for _ in range(10)
+    ]
+    throttled_wait = limiter.acquire("https://example.com/ready", stop_event)
+
+    assert immediate_waits == [0.0] * 10
+    assert throttled_wait == pytest.approx(0.1)
+    assert waits == pytest.approx([0.1])
+
+
+def test_token_bucket_groups_by_normalized_destination() -> None:
+    current_time = 10.0
+    waits: list[float] = []
+
+    def wait(stop_event: Event, delay: float) -> bool:
+        nonlocal current_time
+        waits.append(delay)
+        current_time += delay
+        return False
+
+    limiter = TokenBucketRateLimiter(
+        1,
+        monotonic_clock=lambda: current_time,
+        waiter=wait,
+    )
+    stop_event = Event()
+
+    assert limiter.acquire("https://EXAMPLE.com/health", stop_event) == 0.0
+    assert limiter.acquire("https://example.com/ready?full=true", stop_event) == 1.0
+    assert limiter.acquire("https://example.com:8443/health", stop_event) == 0.0
+    assert limiter.acquire("https://other.example/health", stop_event) == 0.0
+    assert waits == [1.0]
+
+
+def test_token_bucket_uses_effective_http_and_https_ports() -> None:
+    assert TokenBucketRateLimiter.destination_key("https://example.com/a") == (
+        "example.com",
+        443,
+    )
+    assert TokenBucketRateLimiter.destination_key("http://example.com/a") == (
+        "example.com",
+        80,
+    )
+    assert TokenBucketRateLimiter.destination_key("https://example.com:9443/a") == (
+        "example.com",
+        9443,
+    )
+
+
+def test_token_bucket_wait_is_cancelled_by_shutdown() -> None:
+    stop_event = Event()
+    limiter = TokenBucketRateLimiter(
+        1,
+        monotonic_clock=lambda: 10.0,
+        waiter=lambda current_stop_event, delay: current_stop_event.wait(0),
+    )
+
+    assert limiter.acquire("https://example.com/first", stop_event) == 0.0
+    stop_event.set()
+    assert limiter.acquire("https://example.com/second", stop_event) is None
+
+
 def test_scheduler_skips_ongoing_endpoints_and_reserves_before_submit() -> None:
     first_endpoint = endpoint()
     second_id = UUID("c6f8e4bb-5e6f-46e6-9d70-b4c9f9532f9c")
@@ -200,6 +287,38 @@ def test_scheduler_records_checks_with_and_without_responses() -> None:
         "health_service_health_checks_total",
         {"outcome": "no_response"},
     ) == no_response_before + 1
+
+
+def test_scheduler_acquires_rate_limit_permit_before_check(caplog) -> None:
+    events: list[str] = []
+    persisted_ids: list[UUID] = []
+
+    class RecordingRateLimiter:
+        def acquire(self, url: str, stop_event: Event) -> float:
+            assert url == "https://example.com/health"
+            events.append("permit")
+            return 0.25
+
+    def check_function(current_endpoint):
+        events.append("check")
+        return result(current_endpoint["id"])
+
+    scheduler = HealthCheckScheduler(
+        schema_initializer=lambda: None,
+        due_endpoint_loader=lambda now: [],
+        check_function=check_function,
+        result_persister=lambda **values: persisted_ids.append(values["endpoint_id"]),
+        rate_limiter=RecordingRateLimiter(),
+    )
+    try:
+        with caplog.at_level("INFO", logger="uvicorn.error"):
+            scheduler._run_endpoint_check(endpoint())
+    finally:
+        scheduler.stop()
+
+    assert events == ["permit", "check"]
+    assert persisted_ids == [ENDPOINT_ID]
+    assert "waited_seconds=0.250" in caplog.text
 
 
 def test_scheduler_tracks_pending_tasks() -> None:
@@ -278,6 +397,7 @@ def test_scheduler_uses_at_most_fifty_workers() -> None:
         due_endpoint_loader=lambda now: due_endpoints,
         check_function=blocking_check,
         result_persister=lambda **values: None,
+        rate_limiter=UnlimitedRateLimiter(),
     )
     try:
         scheduler.run_once(CHECKED_AT)
@@ -310,4 +430,31 @@ def test_scheduler_stop_waits_for_a_running_check() -> None:
     release.set()
     scheduler.stop()
 
+    assert scheduler.ongoing_check_ids == frozenset()
+
+
+def test_scheduler_stop_cancels_a_rate_limited_check() -> None:
+    permit_requested = Event()
+    checks: list[object] = []
+    current_endpoint = endpoint()
+
+    class BlockingRateLimiter:
+        def acquire(self, url: str, stop_event: Event) -> None:
+            permit_requested.set()
+            assert stop_event.wait(timeout=2)
+            return None
+
+    scheduler = HealthCheckScheduler(
+        schema_initializer=lambda: None,
+        due_endpoint_loader=lambda now: [current_endpoint],
+        check_function=lambda value: checks.append(value),
+        result_persister=lambda **values: None,
+        rate_limiter=BlockingRateLimiter(),
+    )
+    scheduler.run_once(CHECKED_AT)
+    assert permit_requested.wait(timeout=2)
+
+    scheduler.stop()
+
+    assert checks == []
     assert scheduler.ongoing_check_ids == frozenset()

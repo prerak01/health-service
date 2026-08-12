@@ -25,13 +25,18 @@ from health_service.database import (
     list_endpoints as fetch_endpoints,
     list_state_transitions as fetch_state_transitions,
 )
-from health_service.scheduler import HealthCheckScheduler
+from health_service.scheduler import (
+    DEFAULT_OUTBOUND_RATE_LIMIT_RPS,
+    HealthCheckScheduler,
+    TokenBucketRateLimiter,
+)
 
 
 StateName = Literal["pending", "healthy", "unhealthy"]
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
+OUTBOUND_RATE_LIMIT_ENV = "HEALTH_SERVICE_OUTBOUND_RATE_LIMIT_RPS"
 
 
 class EndpointCreateRequest(BaseModel):
@@ -107,9 +112,31 @@ def _normalize_time_range(start_time: datetime, end_time: datetime) -> tuple[dat
     return normalized_start, normalized_end
 
 
+def _outbound_rate_limit_rps() -> int:
+    raw_value = os.environ.get(
+        OUTBOUND_RATE_LIMIT_ENV,
+        str(DEFAULT_OUTBOUND_RATE_LIMIT_RPS),
+    )
+    try:
+        requests_per_second = int(raw_value)
+    except ValueError as error:
+        raise ValueError(
+            f"{OUTBOUND_RATE_LIMIT_ENV} must be a positive integer"
+        ) from error
+    if requests_per_second <= 0:
+        raise ValueError(f"{OUTBOUND_RATE_LIMIT_ENV} must be a positive integer")
+    return requests_per_second
+
+
 def create_app(*, enable_scheduler: bool = True) -> FastAPI:
     """Create the application with its process-level configuration."""
-    scheduler = HealthCheckScheduler() if enable_scheduler else None
+    scheduler = (
+        HealthCheckScheduler(
+            rate_limiter=TokenBucketRateLimiter(_outbound_rate_limit_rps())
+        )
+        if enable_scheduler
+        else None
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):

@@ -47,6 +47,8 @@ spec:
               value: "0.0.0.0"
             - name: HEALTH_SERVICE_PORT
               value: {{ .Values.service.port | quote }}
+            - name: HEALTH_SERVICE_OUTBOUND_RATE_LIMIT_RPS
+              value: {{ .Values.outboundRateLimit.requestsPerSecond | quote }}
             - name: HOME
               value: /tmp
           ports:

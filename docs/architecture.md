@@ -82,10 +82,22 @@ Due checks are submitted to a bounded pool of 50 threads. The Python set
 queued twice by this process while an earlier check is still queued or running.
 The scheduler adds the endpoint ID before submission, skips it if it is already
 present, and the worker discards it in a `finally` block after success or
-failure. Each worker performs an HTTP `GET` with a two-second timeout. A check
-is healthy only when the response status exactly matches the configured
-expected status; HTTP errors retain their response status, while connection
-and transport failures store an error message and no status.
+failure.
+
+Before starting an HTTP request, a worker acquires a token from a process-local
+bucket keyed by normalized hostname and effective port. HTTPS and HTTP URLs
+without explicit ports use 443 and 80 respectively; paths do not affect the
+key. Each bucket starts with 10 tokens by default, refills continuously at 10
+tokens per second using a monotonic clock, and is capped at 10 tokens. The one
+`HEALTH_SERVICE_OUTBOUND_RATE_LIMIT_RPS` setting changes both refill rate and
+capacity. A worker without a token waits for the calculated refill time and
+retries under the bucket lock. Waiting is interruptible during shutdown and is
+not recorded as check latency or as an unhealthy result.
+
+After acquiring a token, each worker performs an HTTP `GET` with a two-second
+timeout. A check is healthy only when the response status exactly matches the
+configured expected status; HTTP errors retain their response status, while
+connection and transport failures store an error message and no status.
 
 After a check completes, its completion timestamp is used to calculate
 `next_check_at`. This is fixed-delay scheduling: a slow check shifts the next
@@ -154,7 +166,9 @@ PostgreSQL is heavier than an embedded database and needs its own process,
 credentials, probes, storage, and backups. The MVP also uses a single database
 pod, so it has no database high availability. An ever-growing results table
 will eventually require retention, partitioning, archival, or a specialized
-historical store; those mechanisms are not part of this implementation.
+historical store; those mechanisms are not part of this implementation. The
+[data retention strategy](retention.md) defines the proposed production
+lifecycles and enforcement safeguards.
 
 The main alternatives were less suitable for this MVP:
 
@@ -182,6 +196,12 @@ standard-library blocking HTTP client. This keeps the code direct and the core
 logic easy to unit test. The 50-worker bound prevents unbounded thread creation,
 but queued checks can wait when many endpoints become due together. This model
 is appropriate for the MVP workload, not for arbitrarily large concurrency.
+
+The token buckets prevent request-start bursts from exceeding the configured
+per-destination rate, but they are held in process memory. This is sufficient
+for the chart's single application replica; multiple replicas would each have
+an independent allowance and require distributed limiting or deterministic
+destination ownership.
 
 ### PostgreSQL-backed scheduling state
 
@@ -229,7 +249,8 @@ application restart loop.
 - Scheduler coordination is in memory, so application replicas cannot safely
   be added without duplicate execution.
 - Each database operation opens a new connection; there is no connection pool.
-- Results and transitions have no retention or archival policy and grow until
-  the endpoint is deleted.
+- Results and transitions have no automated retention or archival enforcement
+  and grow until the endpoint is deleted; the documented retention strategy is
+  a future production design.
 - Deleting an endpoint permanently cascades to its history and transitions.
 - The due-endpoint scan is unindexed and returns every due row in one query.
